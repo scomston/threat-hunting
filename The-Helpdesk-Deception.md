@@ -1,7 +1,7 @@
 
 # Threat Hunt Report — The Helpdesk Deception
 
-
+<img width="1477" height="971" alt="image" src="https://github.com/user-attachments/assets/107c27d8-5192-40a8-a177-481b296d9f0c" />
 
 
 ## Executive Summary
