@@ -1,4 +1,9 @@
-# Threat Hunt Report — Virtual Machine Compromise
+# Threat Hunt Report — Port of Entry
+
+<p align="center">
+  <img width="723" height="1083" alt="image" src="https://github.com/user-attachments/assets/6c14bef9-ccfb-4419-88c4-978d03ae6769" />
+</p>
+
 
 ## Executive Summary
 
@@ -19,6 +24,7 @@ This investigation uncovered a deliberate, multi-stage intrusion that targeted A
 
 Here is the logical chain followed, which informed how each flag was detected:
 
+
 | Flag | Timestamp (UTC) | Description | Observed Artifact / Activity |
 |---|---|---|---|
 | **1** | 2025-11-19T18:36:21Z | Remote Access Source | (RDP client IP) `88.97.178.12` |
@@ -29,14 +35,18 @@ Here is the logical chain followed, which informed how each flag was detected:
 | **6** | 2025-11-19T18:49:27Z | Temporary Folder Exclusion | `C:\Users\KENJI~1.SAT\AppData\Local\Temp` |
 | **7** | 2025-11-19T19:06:58Z | Download Utility Abuse | `certutil.exe` |
 | **8** | 2025-11-19T19:07:46Z | Scheduled Task Name | **Windows Update Check** |
-| **9** | 2025-10-09T12:52:14Z | Scheduled Task Target | Privilege enumeration (`whoami /priv`) |
-| **10** | 2025-10-09T12:55:05Z | Proof-of-Access & Egress Validation | Outbound Network Connection to `www.msftconnecttest.com` |
-| **11** | 2025-10-09T12:58:17Z |  Bundling / Staging Artifacts | Creation of `ReconArtifacts.zip` |
-| **12** | 2025-10-09T13:00:40Z |  Outbound Transfer Attempt (Simulated) | Outbound connections to `100.29.147.161` |
-| **13** | 2025-10-09T13:01:28Z | Scheduled Re-Execution Persistence | Task name: `SupportToolUpdater` |
-| **14** | ~same time |  Autorun Fallback Persistence | Fallback named `RemoteAssistUpdater` |
-| **15** | 2025-10-09T13:02:41Z | Planted Narrative / Cover Artifact | `SupportChat_log.lnk` |
-
+| **9** | 2025-11-19T19:07:46Z | Scheduled Task Target | `C:\ProgramData\WindowsCache\svchost.exe` |
+| **10** | 2025-11-19T19:11:04Z | C2 Server Address | Outbound traffic to `78.141.196.6*` |
+| **11** | 2025-11-19T19:11:04Z |  C2 Communication Port | Destination Port `443` |
+| **12** | 2025-11-19T19:07:22Z |  Credential Theft Tool | **mm.exe** |
+| **13** | 2025-11-19T19:08:26Z | Memory Extraction Module | `sekurlsa::logonpasswords` |
+| **14** | 2025-11-19T19:08:58Z |  Data Staging Archive | `export-data.zip` |
+| **15** | 2025-11-19T19:09:21Z | Exfiltration Channel | `discord.com` |
+| **16** | 2025-11-19T19:11:39Z |  Log Tampering | Security |
+| **17** | 2025-11-19T19:09:53Z |  Persistence Account | support |
+| **18** | 2025-11-19T18:49:48Z | Malicious Script | `wupdate.ps1` |
+| **19** | 2025-11-19T19:10:37Z |  Secondary Target |  `10.1.0.188` |
+| **20** | 2025-11-19T19:10:41Z | Remote Access Tool | `mstsc.exe` |
 ---
 
 ## Flag 1 - Remote Access Source
@@ -328,5 +338,313 @@ DeviceNetworkEvents
 
 **Flag 10 Answer:** The IP address of the command and control server: `78.141.196.6`
 
+---
 
+## Flag 11 - C2 Communication Port
 
+**Objective:**
+C2 communication ports can indicate the framework or protocol used. This information supports network detection rules and threat intelligence correlation.
+
+- **Observation:** The communication occurred over port 443.
+- **Logical Flow:** C2 channels commonly mimic legitimate encrypted traffic.
+- **Interpretation:** Using HTTPS allowed the attacker to blend in with normal outbound TLS activity.
+
+**KQL Query Used:**
+
+```kql
+DeviceNetworkEvents
+| where DeviceName == "azuki-sl"
+| where TimeGenerated between (datetime(2025-11-19) .. datetime(2025-11-20))
+| where InitiatingProcessFileName == "svchost.exe"
+| where InitiatingProcessFolderPath contains @"C:\ProgramData\WindowsCache"
+| project TimeGenerated, RemoteIP, RemotePort, Protocol, InitiatingProcessFileName, InitiatingProcessCommandLine
+| order by TimeGenerated asc
+```
+<img width="884" height="233" alt="image" src="https://github.com/user-attachments/assets/2e345308-dff7-452a-bda6-324832d151c4" />
+
+**Flag 11 Answer:** The destination port used for command and control communications: `443`
+
+---
+
+## Flag 12 - Credential Theft Tool
+
+**Objective:**
+Credential dumping tools extract authentication secrets from system memory. These tools are typically renamed to avoid signature-based detection.
+
+- **Observation:** A short-named executable mm.exe appeared in the staging directory.
+- **Logical Flow:** After establishing C2, attackers expand privileges — often via credential theft.
+- **Interpretation:** This file was likely a renamed Mimikatz binary used for credential extraction.
+
+**KQL Query Used:**
+
+```kql
+DeviceFileEvents
+| where DeviceName == "azuki-sl"
+| where TimeGenerated between (datetime(2025-11-19) .. datetime(2025-11-20))
+| where FolderPath contains @"C:\ProgramData\WindowsCache"
+| where FileName endswith ".exe"
+| project TimeGenerated, FileName, FolderPath
+| order by TimeGenerated asc
+```
+<img width="680" height="175" alt="image" src="https://github.com/user-attachments/assets/59c09a75-d2e6-4a2e-9f25-304153c31b7e" />
+
+**Flag 12 Answer:** The filename of the credential dumping tool: `mm.exe`
+
+---
+
+## Flag 13 - Memory Extraction Module
+
+**Objective:**
+Credential dumping tools use specific modules to extract passwords from security subsystems. Documenting the exact technique used aids in detection engineering.
+
+- **Observation:** The attacker invoked sekurlsa::logonpasswords.
+- **Logical Flow:** Which exact technique was used to steal credentials from memory?
+- **Interpretation:** Classic LSASS harvesting, indicating full credential compromise on the host.
+
+**KQL Query Used:**
+
+```kql
+DeviceProcessEvents
+| where DeviceName == "azuki-sl"
+| where TimeGenerated between (datetime(2025-11-19) .. datetime(2025-11-20))
+| where InitiatingProcessFileName == "mm.exe"
+| project TimeGenerated, FileName, ProcessCommandLine
+| order by TimeGenerated asc
+```
+```kql
+DeviceProcessEvents
+| where DeviceName == "azuki-sl"
+| where TimeGenerated between (datetime(2025-11-19) .. datetime(2025-11-20))
+| where FileName endswith "mm.exe"
+| project TimeGenerated, FileName, ProcessCommandLine
+| order by TimeGenerated asc
+```
+<img width="750" height="147" alt="image" src="https://github.com/user-attachments/assets/084c8a1d-5690-40ea-a4ed-fe507f44fc08" />
+
+**Flag 13 Answer:** The module used to extract logon passwords from memory: `sekurlsa::logonpasswords`
+
+---
+
+## Flag 14 - Data Staging Archive
+
+**Objective:**
+Attackers compress stolen data for efficient exfiltration. The archive filename often includes dates or descriptive names for the attacker's organisation.
+
+- **Observation:** Stolen data was packaged into export-data.zip.
+- **Logical Flow:** Credentials obtained, next comes data harvesting.
+- **Interpretation:** Compressed archive likely contained sensitive shipping contract and pricing data.
+
+**KQL Query Used:**
+
+```kql
+DeviceFileEvents
+| where DeviceName == "azuki-sl"
+| where TimeGenerated between (datetime(2025-11-19) .. datetime(2025-11-20))
+| where FolderPath contains @"C:\ProgramData\WindowsCache"
+| where FileName endswith ".zip"
+| project TimeGenerated, FileName, FolderPath
+| order by TimeGenerated asc
+```
+<img width="711" height="145" alt="image" src="https://github.com/user-attachments/assets/7181121b-6a75-476b-bede-1375f97ce162" />
+
+**Flag 14 Answer:** The compressed archive filename used for data exfiltration: `export-data.zip`
+
+---
+
+## Flag 15 - Exfiltration Channel
+
+**Objective:**
+Cloud services with upload capabilities are frequently abused for data theft. Identifying the service helps with incident scope determination and potential data recovery.
+
+- **Observation:** Exfiltration occurred via Discord, leveraging HTTPS file upload features.
+- **Logical Flow:** Staged data must leave the network — through a covert, user-friendly channel.
+- **Interpretation:** Discord is often abused due to its CDN hosting and lack of enterprise monitoring.
+
+**KQL Query Used:**
+
+```kql
+DeviceNetworkEvents
+| where DeviceName == "azuki-sl"
+| where TimeGenerated between (datetime(2025-11-19) .. datetime(2025-11-20))
+| where RemotePort == 443
+| project TimeGenerated, RemoteUrl, RemoteIP, InitiatingProcessFileName, InitiatingProcessCommandLine
+| order by TimeGenerated asc
+```
+<img width="1424" height="234" alt="image" src="https://github.com/user-attachments/assets/16ae64d8-bf0c-41a2-86fa-f2902d1ca40d" />
+
+**Flag 15 Answer:** The cloud service used to exfiltrate stolen data: `Discord`
+
+---
+
+## Flag 16 - Log Tampering
+
+**Objective:**
+Clearing event logs destroys forensic evidence and impedes investigation efforts. The order of log clearing can indicate attacker priorities and sophistication.
+
+- **Observation:** The Security event log was cleared first.
+- **Logical Flow:** To cover their tracks, what evidence did the attacker attempt to erase first?
+- **Interpretation:** Wiping the Security log removes authentication traces, hiding compromise and privilege escalation.
+
+**KQL Query Used:**
+
+```kql
+DeviceProcessEvents
+| where DeviceName == "azuki-sl"
+| where TimeGenerated between (datetime(2025-11-19) .. datetime(2025-11-20))
+| where FileName =~ "wevtutil.exe"
+| where ProcessCommandLine contains " cl "
+| project TimeGenerated, ProcessCommandLine
+| order by TimeGenerated asc
+```
+<img width="435" height="175" alt="image" src="https://github.com/user-attachments/assets/435ff913-c97d-49e9-804d-7c0d1bae86e6" />
+
+**Flag 16 Answer:** The first Windows event log cleared by the attacker: `Security`
+
+---
+
+## Flag 17 - Log Tampering
+
+**Objective:**
+Hidden administrator accounts provide alternative access for future operations. These accounts are often configured to avoid appearing in normal user interfaces.
+
+- **Observation:** A hidden administrative backdoor account named support was created.
+- **Logical Flow:** Even after C2, the attacker ensures future access independent of malware.
+- **Interpretation:** This account allowed long-term, malware-less persistence — extremely dangerous.
+
+**KQL Query Used:**
+
+```kql
+DeviceProcessEvents
+| where DeviceName == "azuki-sl"
+| where TimeGenerated between (datetime(2025-11-19) .. datetime(2025-11-20))
+| where ProcessCommandLine contains "localgroup" and ProcessCommandLine contains "add"
+| project TimeGenerated, ProcessCommandLine
+| order by TimeGenerated asc
+```
+<img width="517" height="143" alt="image" src="https://github.com/user-attachments/assets/67bb0505-032c-4e89-8f11-465db5d54fee" />
+
+**Flag 17 Answer:** The backdoor account username created by the attacker: `support`
+
+---
+
+## Flag 18 - Malicious Script
+
+**Objective:**
+Attackers often use scripting languages to automate their attack chain. Identifying the initial attack script reveals the entry point and automation method used in the compromise.
+
+- **Observation:** Initial automation performed through wupdate.ps1.
+- **Logical Flow:** To bootstrap the attack, a script downloads tools, sets exclusions, and deploys implants.
+- **Interpretation:** This PowerShell script served as the attack’s orchestrator.
+
+**KQL Query Used:**
+
+```kql
+DeviceFileEvents
+| where DeviceName == "azuki-sl"
+| where TimeGenerated between (datetime(2025-11-19) .. datetime(2025-11-20))
+| where FileName endswith ".ps1"
+| where InitiatingProcessCommandLine contains "http" or InitiatingProcessCommandLine contains "download"
+| project TimeGenerated, FileName, InitiatingProcessCommandLine
+| order by TimeGenerated asc
+
+```
+<img width="1342" height="232" alt="image" src="https://github.com/user-attachments/assets/8e272a7b-a3db-4665-90e4-e29dcd0fbcbb" />
+
+**Flag 18 Answer:** The PowerShell script file used to automate the attack chain: `wupdate.ps1`
+
+---
+
+## Flag 19 - Secondary Target
+
+**Objective:**
+Lateral movement targets are selected based on their access to sensitive data or network privileges. Identifying these targets reveals attacker objectives.
+
+- **Observation:** The attacker attempted to access 10.1.0.188.
+- **Logical Flow:** With credentials in hand, the actor expands into the internal network.
+- **Interpretation:** 10.1.0.188 was likely a higher-privilege system or file server of interest.
+
+**KQL Query Used:**
+
+```kql
+DeviceProcessEvents
+| where DeviceName == "azuki-sl"
+| where TimeGenerated between (datetime(2025-11-19) .. datetime(2025-11-20))
+| where ProcessCommandLine matches regex @"\b\d{1,3}(\.\d{1,3}){3}\b"
+| project TimeGenerated, ProcessCommandLine
+| order by TimeGenerated asc
+
+```
+<img width="720" height="121" alt="image" src="https://github.com/user-attachments/assets/d3bcf9b5-0676-4116-b493-5ebb5451e017" />
+
+**Flag 19 Answer:** The IP address was targeted for lateral movement: `10.1.0.188`
+
+---
+
+## Flag 20 - Remote Access Tool
+
+**Objective:**
+Built-in remote access tools are preferred for lateral movement as they blend with legitimate administrative activity. This technique is harder to detect than custom tools.
+
+- **Observation:** The attacker used mstsc.exe to initiate lateral RDP sessions.
+- **Logical Flow:** With target identified, what tool did they use to pivot?
+- **Interpretation:** The attack leveraged legitimate Remote Desktop Protocol for stealthy movement inside the network. Attackers commonly use mstsc.exe (Microsoft Terminal Services Client — the Windows Remote Desktop client). It appears near the end of the attack chain when connecting to the lateral movement target. This matches the behavior described in Flag 19 where an IP was used with /v: as argument.
+
+**KQL Query Used:**
+
+```kql
+DeviceProcessEvents
+| where DeviceName == "azuki-sl"
+| where TimeGenerated between (datetime(2025-11-19) .. datetime(2025-11-20))
+| where ProcessCommandLine matches regex @"\b\d{1,3}(\.\d{1,3}){3}\b"
+| project TimeGenerated, ProcessCommandLine
+| order by TimeGenerated asc
+```
+<img width="401" height="86" alt="image" src="https://github.com/user-attachments/assets/351cafc5-7889-4397-8d31-a071ea594117" />
+
+**Flag 20 Answer:** The remote access tool used for lateral movement: `mstsc.exe`
+
+---
+
+## MITRE ATT&CK Mapping 
+
+| Tactic | Technique | ATT&CK ID | Evidence |
+|---|---|---|---|
+| Initial Access | Valid Accounts | T1078 | RDP success from external IP (**Flags 1, 2**) |
+| Discovery | Network Service Scanning | T1046 | `arp -a` (**Flag 3**) |
+| Defense Evasion | Impair Defenses | T1562 | Defender exclusions and hidden staging directory (**Flags 4, 5, 6**) |
+| Execution | Command and Scripting Interpreter | T1059.001 | PowerShell script `wupdate.ps1` (**Flag 18**) |
+| Persistence | Scheduled Task | T1053.005 | **Windows Update Check** scheduled task (**Flags 8, 9**) |
+| Credential Access | OS Credential Dumping | T1003.001 | `mm.exe` + `sekurlsa::logonpasswords` (**Flags 12, 13**) |
+| Collection | Data Staged | T1074 | `export-data.zip` (**Flag 14**) |
+| Exfiltration | Exfiltration Over Web Service | T1567.002 | Upload to `discord.com` (**Flag 15**) |
+| Impact | Account Manipulation | T1098 | `support` local administrator account (**Flag 17**) |
+| Defense Evasion | Indicator Removal | T1070.001 | `wevtutil cl Security` (**Flag 16**) |
+| Lateral Movement | Remote Services: RDP | T1021.001 | `mstsc.exe` to `10.1.0.188` (**Flags 19, 20**) |
+
+---
+
+## Recommendations
+
+**1. Contain & eradicate**
+
+- Isolate AZUKI-SL and collect full forensic images and EDR artifacts.
+- Rotate credentials for affected accounts (kenji.sato, service accounts) and require MFA for remote access.
+- Remove attacker-created scheduled tasks and backdoor local accounts.
+
+**2. Hardening & prevention**
+
+- Restrict RDP exposure and require VPN + MFA for remote admin access.
+- Block or restrict LOLBins (certutil, bitsadmin) or monitor their network use.
+- Enforce application control to prevent execution from C:\ProgramData\WindowsCache and user temp folders.
+
+**3. Detection & monitoring**
+
+- Create alerts on: certutil network downloads, scheduled task creations with suspicious names, archive creation in staging folders, use of sekurlsa/Mimikatz indicators, and outbound connections to unusual cloud services (Discord, etc.).
+- Log and monitor registry changes to Defender exclusions.
+- Retain full command line telemetry and enhance LSASS access detection.
+
+**4. Post-incident**
+
+- Notify affected suppliers and engage legal/PR if exfiltration of contracts was confirmed.
+- Conduct a comprehensive review for lateral movement from 10.1.0.188 and other internal hosts.
+- Run a thorough credential audit and force a password rotation across the estate.
